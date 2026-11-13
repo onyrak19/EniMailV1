@@ -23,7 +23,7 @@ if not DEBUG:
 INSTALLED_APPS = [
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
     "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles",
-    "rest_framework", "corsheaders", "accounts", "mailbox",
+    "rest_framework", "corsheaders", "accounts", "mailbox", "filestore",
 ]
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware", "django.middleware.security.SecurityMiddleware",
@@ -54,7 +54,9 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STORAGES = {
-    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    # FILE_STORAGE=db : fichiers (pieces jointes, avatars) stockes dans la base, donc conserves sur Render
+    "default": {"BACKEND": "filestore.storage.DatabaseStorage" if os.getenv("FILE_STORAGE") == "db"
+                else "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage" if not DEBUG
                     else "django.contrib.staticfiles.storage.StaticFilesStorage"},
 }
