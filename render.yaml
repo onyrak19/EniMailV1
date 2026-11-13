@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: eni-mail
+    runtime: docker
+    plan: free
+    healthCheckPath: /admin/login/
+    envVars:
+      - key: DB_ENGINE
+        value: sqlite
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: EMAIL_MODE
+        value: brevo
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_SENDER_EMAIL
+        sync: false
+      - key: EMAIL_FALLBACK
+        value: "1"
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
