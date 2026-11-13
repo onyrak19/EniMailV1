@@ -1,4 +1,4 @@
-import json, threading
+import json, os, threading
 from django.core.mail import get_connection, EmailMessage
 from django.db.models import Q
 from django.http import FileResponse
@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from accounts.models import User
 from .models import Message, Recipient, Attachment
 
-APP_URL = "http://localhost:5173"
+APP_URL = os.getenv("APP_URL", "http://localhost:5173")
 BLOCKED = (".exe", ".bat", ".cmd", ".com", ".scr", ".msi", ".vbs", ".jar", ".ps1")
 MAX_FILE, MAX_FILES = 10 * 1024 * 1024, 10
 
