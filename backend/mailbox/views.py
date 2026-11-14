@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
-from accounts.models import User
+from accounts.models import User, Role
 from .models import Message, Recipient, Attachment
 
 APP_URL = os.getenv("APP_URL", "http://localhost:5173")
@@ -16,14 +16,21 @@ MAX_FILE, MAX_FILES = 10 * 1024 * 1024, 10
 def _send_alerts(items):
     try:
         conn = get_connection()
-        conn.send_messages([EmailMessage("Nouveau message sur ENI Mail",
-            "Bonjour %s,\n\nVous avez un nouveau message de %s sur votre adresse ENI Mail.\nObjet : %s\n\nOuvrez ENI Mail : %s" % (n, s, sub, APP_URL),
-            None, [e], connection=conn) for e, n, s, sub in items])
+        msgs = []
+        for e, n, s, sub, body, natt in items:
+            text = "Bonjour %s,\n\nVous avez un nouveau message de %s sur votre adresse ENI Mail.\nObjet : %s\n" % (n, s, sub)
+            if body is not None:
+                text += "\n----------------------------------------\n%s\n----------------------------------------\n" % body
+                if natt: text += "\nPieces jointes : %d (a telecharger dans ENI Mail).\n" % natt
+            text += "\nOuvrez ENI Mail : %s" % APP_URL
+            msgs.append(EmailMessage(("ENI Mail : " + sub) if body is not None else "Nouveau message sur ENI Mail", text, None, [e], connection=conn))
+        conn.send_messages(msgs)
     except Exception as ex:
         print("Alertes e-mail non envoyees:", ex)
 
-def notify(users, sender, subject):
-    items = [(u.email, u.display, sender.display, subject or "(sans objet)") for u in users if u.notify_by_email and not u.email.endswith(".local")]
+def notify(users, sender, subject, body=None, natt=0):
+    """body=None : simple alerte (objet seulement). body=texte : le contenu du message est aussi envoye par e-mail."""
+    items = [(u.email, u.display, sender.display, subject or "(sans objet)", body, natt) for u in users if u.notify_by_email and not u.email.endswith(".local")]
     if items: threading.Thread(target=_send_alerts, args=(items,), daemon=True).start()
 
 def _atts(m): return [{"id": a.id, "name": a.name, "size": a.size} for a in m.attachments.all()]
@@ -39,7 +46,7 @@ def _draft_info(m):
     d = m.draft_data or {}
     us = User.objects.filter(id__in=d.get("user_ids") or [])
     return {"to": [{"id": u.id, "name": u.display} for u in us], "broadcast": bool(d.get("broadcast")), "levels": d.get("levels") or [],
-            "parcours": d.get("parcours") or [], "include_teachers": bool(d.get("include_teachers"))}
+            "parcours": d.get("parcours") or [], "include_teachers": bool(d.get("include_teachers")), "email_copy": bool(d.get("email_copy"))}
 
 BOXES = {"inbox": dict(is_deleted=False, is_archived=False), "starred": dict(is_deleted=False, is_starred=True),
          "archive": dict(is_deleted=False, is_archived=True), "trash": dict(is_deleted=True)}
@@ -72,13 +79,14 @@ def _can_access(user, m):
 def _targets(u, p):
     t = set(User.objects.filter(id__in=p.get("user_ids") or [], is_approved=True, is_active=True))
     if p.get("broadcast"):
-        if u.role == "student": raise PermissionDenied("Envoi groupe reserve aux professeurs")
-        qs = User.objects.filter(role="student", is_active=True)
+        if not Role.objects.filter(code=u.role, can_broadcast=True).exists(): raise PermissionDenied("Envoi groupe non autorise pour votre role")
+        qs = User.objects.filter(role__in=list(Role.objects.filter(has_academic=True).values_list("code", flat=True)), is_active=True, is_approved=True)
         if p.get("levels"): qs = qs.filter(level__in=p["levels"])
         if p.get("parcours"): qs = qs.filter(parcours__in=p["parcours"])
         t |= set(qs)
         if p.get("include_teachers") and u.role == "admin":
-            t |= set(User.objects.filter(role="teacher", is_approved=True, is_active=True))
+            others = list(Role.objects.filter(has_academic=False).exclude(code="admin").values_list("code", flat=True))
+            t |= set(User.objects.filter(role__in=others, is_approved=True, is_active=True))
     t.discard(u)
     return t
 
@@ -94,7 +102,7 @@ def send(request):
         if f.name.lower().endswith(BLOCKED): return Response({"error": "Type de fichier interdit : " + f.name}, status=400)
     subject, body = (p.get("subject") or "").strip()[:200], (p.get("body") or "").strip()
     draft = Message.objects.filter(pk=p["draft_id"], sender=u, is_draft=True).first() if p.get("draft_id") else None
-    data = {k: p.get(k) for k in ("user_ids", "broadcast", "levels", "parcours", "include_teachers")}
+    data = {k: p.get(k) for k in ("user_ids", "broadcast", "levels", "parcours", "include_teachers", "email_copy")}
     save_draft, targets = bool(p.get("save_draft")), set()
     if not save_draft:
         if not subject or not body: return Response({"error": "Objet et message requis"}, status=400)
@@ -115,7 +123,7 @@ def send(request):
     if save_draft:
         return Response({"draft_id": msg.id, "attachments": _atts(msg)})
     Recipient.objects.bulk_create([Recipient(message=msg, user=t) for t in targets])
-    notify(targets, u, subject)
+    notify(targets, u, subject, body if p.get("email_copy") else None, msg.attachments.count())
     return Response({"sent_to": len(targets)}, status=201)
 
 ACTIONS = {"read": {"is_read": True}, "unread": {"is_read": False}, "star": {"is_starred": True}, "unstar": {"is_starred": False},
@@ -171,6 +179,7 @@ def stats(request):
            "sent": Message.objects.filter(sender=u, is_draft=False, sender_deleted=False).count(),
            "drafts": Message.objects.filter(sender=u, is_draft=True).count()}
     if u.role == "admin":
-        out.update({"students": User.objects.filter(role="student").count(), "teachers": User.objects.filter(role="teacher", is_approved=True).count(),
-                    "pending": User.objects.filter(role="teacher", is_approved=False).count(), "messages": Message.objects.filter(is_draft=False).count()})
+        out.update({"students": User.objects.filter(role__in=list(Role.objects.filter(has_academic=True).values_list("code", flat=True))).count(),
+                    "teachers": User.objects.filter(role="teacher", is_approved=True).count(),
+                    "pending": User.objects.filter(is_approved=False).count(), "messages": Message.objects.filter(is_draft=False).count()})
     return Response(out)

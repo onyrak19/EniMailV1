@@ -11,11 +11,16 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import User, EmailCode, LEVELS, PARCOURS, DOMAIN
+from .models import User, EmailCode, Level, Parcours, Role, DOMAIN
 
 IMG = (".png", ".jpg", ".jpeg", ".gif", ".webp")
-ROLES = ("admin", "teacher", "student")
 PUBLIC = [api_view, ]
+
+def role_codes(): return list(Role.objects.values_list("code", flat=True))
+def role_codes_where(**kw): return list(Role.objects.filter(**kw).values_list("code", flat=True))
+def to_int(v, default=0):
+    try: return max(0, min(int(v), 9999))
+    except (TypeError, ValueError): return default
 
 def ser(u):
     return {"id": u.id, "name": u.display, "username": u.username, "email": u.email, "role": u.role, "level": u.level,
@@ -50,8 +55,10 @@ def check_username(v, exclude=None):
     if qs.exists(): return "Ce nom d'utilisateur est deja pris"
 
 def academic(role, d):
-    if role != "student": return "", ""
-    return (d.get("level") if d.get("level") in LEVELS else ""), (d.get("parcours") if d.get("parcours") in PARCOURS else "")
+    r = Role.objects.filter(code=role).first()
+    if not (r and r.has_academic): return "", ""
+    lv, pc = d.get("level") or "", d.get("parcours") or ""
+    return (lv if Level.objects.filter(code=lv).exists() else ""), (pc if Parcours.objects.filter(code=pc).exists() else "")
 
 def send_code(email, purpose, subject):
     code = "%06d" % secrets.randbelow(1000000)
@@ -77,7 +84,7 @@ class LoginSer(TokenObtainPairSerializer):
         attrs["username"] = found.username if found else attrs["username"].strip()
         data = super().validate(attrs)
         if not self.user.is_approved:
-            raise PermissionDenied("Compte professeur en attente de validation par l'administrateur.")
+            raise PermissionDenied("Compte en attente de validation par l'administrateur.")
         data["user"] = ser(self.user)
         return data
 
@@ -104,21 +111,22 @@ def register(request):
     name, role, username = (d.get("name") or "").strip(), d.get("role"), (d.get("username") or "").strip()
     e = check_username(username)
     if e: return bad(e)
-    if not name or role not in ("student", "teacher") or len(d.get("password") or "") < 6:
+    ro = Role.objects.filter(code=role, self_register=True).first()
+    if not name or not ro or len(d.get("password") or "") < 6:
         return bad("Nom, role et mot de passe (6 caracteres min.) requis")
     level, parcours = academic(role, d)
-    if role == "student" and not (level and parcours): return bad("Niveau et parcours requis")
+    if ro.has_academic and not (level and parcours): return bad("Niveau et parcours requis")
     if User.objects.filter(email__iexact=email).exists(): return bad("Cette adresse est deja inscrite")
     rec = check_code(email, "register", d.get("code"))
     if not rec: return bad("Code incorrect ou expire")
     u = User.objects.create_user(username=username, email=email, password=d["password"], first_name=name, role=role,
-                                 level=level, parcours=parcours, is_approved=(role == "student"))
+                                 level=level, parcours=parcours, is_approved=not ro.requires_approval)
     rec.delete()
-    mail_async("Bienvenue sur ENI Mail", "Bonjour %s,\n\nVotre compte ENI Mail est cree.\nVotre adresse ENI Mail : %s\nNom d'utilisateur : %s\n%s" % (name, u.address, u.username, "Un administrateur doit valider votre compte professeur." if role == "teacher" else "Vous pouvez vous connecter."), [email])
-    if role == "teacher":
+    mail_async("Bienvenue sur ENI Mail", "Bonjour %s,\n\nVotre compte ENI Mail est cree.\nVotre adresse ENI Mail : %s\nNom d'utilisateur : %s\n%s" % (name, u.address, u.username, "Un administrateur doit valider votre compte." if ro.requires_approval else "Vous pouvez vous connecter."), [email])
+    if ro.requires_approval:
         for a in User.objects.filter(role="admin", is_active=True, notify_by_email=True):
-            mail_async("Nouvelle inscription professeur - ENI Mail",
-                       "Bonjour %s,\n\n%s (%s) demande la validation de son compte professeur.\nConnectez-vous a ENI Mail > Administration pour la valider ou la refuser." % (a.display, name, email), [a.email])
+            mail_async("Nouvelle inscription a valider - ENI Mail",
+                       "Bonjour %s,\n\n%s (%s) demande la validation de son compte (%s).\nConnectez-vous a ENI Mail > Administration pour la valider ou la refuser." % (a.display, name, email, ro.name), [a.email])
     return Response({"pending": not u.is_approved, "address": u.address}, status=201)
 
 @public
@@ -151,9 +159,9 @@ def me(request):
         if d.get("name"): u.first_name, u.last_name = d["name"].strip(), ""
         if "phone" in d: u.phone = (d["phone"] or "")[:30]
         if "notify" in d: u.notify_by_email = bool(d["notify"])
-        if u.role == "student":
-            if d.get("level") in LEVELS: u.level = d["level"]
-            if d.get("parcours") in PARCOURS: u.parcours = d["parcours"]
+        if Role.objects.filter(code=u.role, has_academic=True).exists():
+            if Level.objects.filter(code=d.get("level") or "").exists(): u.level = d["level"]
+            if Parcours.objects.filter(code=d.get("parcours") or "").exists(): u.parcours = d["parcours"]
         u.save()
     return Response(ser(u))
 
@@ -185,9 +193,9 @@ def users(request):
     if q == "enimail": q = ""
     qs = User.objects.filter(is_approved=True, is_active=True).exclude(id=request.user.id)
     if q: qs = qs.filter(Q(first_name__icontains=q) | Q(username__icontains=q) | Q(email__iexact=raw))
-    if g.get("role") in ROLES: qs = qs.filter(role=g["role"])
-    if g.get("level") in LEVELS: qs = qs.filter(level=g["level"])
-    if g.get("parcours") in PARCOURS: qs = qs.filter(parcours=g["parcours"])
+    if g.get("role") in role_codes(): qs = qs.filter(role=g["role"])
+    if g.get("level"): qs = qs.filter(level=g["level"])
+    if g.get("parcours"): qs = qs.filter(parcours=g["parcours"])
     return Response([pub(u) for u in qs.order_by("first_name")[:60 if g.get("full") else 20]])
 
 @api_view(["GET"])
@@ -203,22 +211,22 @@ def _admin(request):
 @api_view(["GET"])
 def pending(request):
     _admin(request)
-    return Response([ser(u) for u in User.objects.filter(role="teacher", is_approved=False)])
+    return Response([ser(u) for u in User.objects.filter(role__in=role_codes_where(requires_approval=True), is_approved=False)])
 
 @api_view(["POST"])
 def approve(request, pk):
     _admin(request)
-    u = get_object_or_404(User, pk=pk, role="teacher")
+    u = get_object_or_404(User, pk=pk, role__in=role_codes_where(requires_approval=True))
     u.is_approved = True; u.save()
-    mail_async("Compte ENI Mail valide", "Bonjour %s, votre compte professeur a ete valide.\nVotre adresse ENI Mail : %s\nVous pouvez vous connecter." % (u.display, u.address), [u.email])
+    mail_async("Compte ENI Mail valide", "Bonjour %s, votre compte a ete valide.\nVotre adresse ENI Mail : %s\nVous pouvez vous connecter." % (u.display, u.address), [u.email])
     return Response({"ok": True})
 
 @api_view(["POST"])
 def reject(request, pk):
     _admin(request)
-    u = User.objects.filter(pk=pk, role="teacher", is_approved=False).first()
+    u = User.objects.filter(pk=pk, role__in=role_codes_where(requires_approval=True), is_approved=False).first()
     if u:
-        mail_async("Inscription ENI Mail refusee", "Bonjour %s, votre demande de compte professeur a ete refusee." % u.display, [u.email]); u.delete()
+        mail_async("Inscription ENI Mail refusee", "Bonjour %s, votre demande de compte a ete refusee." % u.display, [u.email]); u.delete()
     return Response({"ok": True})
 
 @api_view(["GET", "POST"])
@@ -230,7 +238,7 @@ def admin_users(request):
         e = check_username(username)
         if e: return bad(e)
         if "@" not in email or User.objects.filter(email__iexact=email).exists(): return bad("E-mail invalide ou deja utilise")
-        if role not in ROLES or not (d.get("name") or "").strip() or len(d.get("password") or "") < 6:
+        if role not in role_codes() or not (d.get("name") or "").strip() or len(d.get("password") or "") < 6:
             return bad("Nom, role et mot de passe (6 caracteres min.) requis")
         level, parcours = academic(role, d)
         u = User.objects.create_user(username=username, email=email, password=d["password"], first_name=d["name"].strip(), role=role,
@@ -239,7 +247,7 @@ def admin_users(request):
     q, role = request.GET.get("q", "").strip(), request.GET.get("role", "")
     qs = User.objects.all().order_by("role", "first_name")
     if q: qs = qs.filter(Q(first_name__icontains=q) | Q(email__icontains=q) | Q(username__icontains=q))
-    if role in ROLES: qs = qs.filter(role=role)
+    if role in role_codes(): qs = qs.filter(role=role)
     return Response([ser(u) for u in qs[:300]])
 
 @api_view(["PATCH", "DELETE"])
@@ -260,7 +268,7 @@ def admin_user(request, pk):
         if "@" not in em or User.objects.filter(email__iexact=em).exclude(pk=u.pk).exists(): return bad("E-mail invalide ou deja utilise")
         u.email = em
     if d.get("name"): u.first_name, u.last_name = d["name"].strip(), ""
-    if d.get("role") in ROLES:
+    if d.get("role") in role_codes():
         u.role = d["role"]; u.is_staff = u.is_superuser = (u.role == "admin")
     if "is_active" in d: u.is_active = bool(d["is_active"])
     if "is_approved" in d: u.is_approved = bool(d["is_approved"])
@@ -270,3 +278,92 @@ def admin_user(request, pk):
     u.level, u.parcours = academic(u.role, {"level": d.get("level", u.level), "parcours": d.get("parcours", u.parcours)})
     u.save()
     return Response(ser(u))
+
+
+# ---------- Configuration (niveaux, parcours, roles) ----------
+def _ser_role(r):
+    return {"id": r.id, "code": r.code, "name": r.name, "is_system": r.is_system, "has_academic": r.has_academic,
+            "requires_approval": r.requires_approval, "can_broadcast": r.can_broadcast, "self_register": r.self_register,
+            "used": User.objects.filter(role=r.code).count()}
+
+def _ser_cat(o, field):
+    return {"id": o.id, "code": o.code, "name": o.name or o.code, "order": o.order, "used": User.objects.filter(**{field: o.code}).count()}
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def config(request):
+    return Response({"levels": [_ser_cat(o, "level") for o in Level.objects.all()],
+                     "parcours": [_ser_cat(o, "parcours") for o in Parcours.objects.all()],
+                     "roles": [_ser_role(r) for r in Role.objects.all()], "domain": DOMAIN})
+
+CODE_RE = r"[A-Za-z0-9._-]{1,20}"
+
+def _catalog(request, Model, field, pk=None):
+    _admin(request)
+    d = request.data
+    if pk is None:
+        if request.method == "GET": return Response([_ser_cat(o, field) for o in Model.objects.all()])
+        code = (d.get("code") or "").strip()
+        if not re.fullmatch(CODE_RE, code): return bad("Code invalide (1 a 20 caracteres : lettres, chiffres, . _ -)")
+        if Model.objects.filter(code__iexact=code).exists(): return bad("Ce code existe deja")
+        o = Model.objects.create(code=code, name=(d.get("name") or "").strip()[:60], order=to_int(d.get("order"), Model.objects.count() + 1))
+        return Response(_ser_cat(o, field), status=201)
+    o = get_object_or_404(Model, pk=pk)
+    if request.method == "DELETE":
+        n = User.objects.filter(**{field: o.code}).count()
+        if n: return bad("Impossible : %d utilisateur(s) utilisent %s. Reaffectez-les d'abord." % (n, o.code))
+        o.delete(); return Response({"ok": True})
+    if "code" in d and (d["code"] or "").strip() != o.code:
+        new = (d["code"] or "").strip()
+        if not re.fullmatch(CODE_RE, new): return bad("Code invalide (1 a 20 caracteres : lettres, chiffres, . _ -)")
+        if Model.objects.filter(code__iexact=new).exclude(pk=o.pk).exists(): return bad("Ce code existe deja")
+        User.objects.filter(**{field: o.code}).update(**{field: new}); o.code = new
+    if "name" in d: o.name = (d["name"] or "").strip()[:60]
+    if "order" in d: o.order = to_int(d["order"], o.order)
+    o.save()
+    return Response(_ser_cat(o, field))
+
+@api_view(["GET", "POST"])
+def admin_levels(request): return _catalog(request, Level, "level")
+
+@api_view(["PATCH", "DELETE"])
+def admin_level(request, pk): return _catalog(request, Level, "level", pk)
+
+@api_view(["GET", "POST"])
+def admin_parcours_list(request): return _catalog(request, Parcours, "parcours")
+
+@api_view(["PATCH", "DELETE"])
+def admin_parcours_one(request, pk): return _catalog(request, Parcours, "parcours", pk)
+
+FLAGS = ("has_academic", "requires_approval", "can_broadcast", "self_register")
+
+@api_view(["GET", "POST"])
+def admin_roles(request):
+    _admin(request)
+    if request.method == "GET": return Response([_ser_role(r) for r in Role.objects.all()])
+    d = request.data
+    code, name = (d.get("code") or "").strip().lower(), (d.get("name") or "").strip()[:60]
+    if not re.fullmatch(r"[a-z0-9_-]{2,30}", code): return bad("Code invalide (2 a 30 caracteres : minuscules, chiffres, - _)")
+    if not name: return bad("Nom du role requis")
+    if Role.objects.filter(code=code).exists(): return bad("Ce code existe deja")
+    r = Role.objects.create(code=code, name=name, **{f: bool(d.get(f)) for f in FLAGS})
+    return Response(_ser_role(r), status=201)
+
+@api_view(["PATCH", "DELETE"])
+def admin_role(request, pk):
+    _admin(request)
+    r, d = get_object_or_404(Role, pk=pk), request.data
+    if request.method == "DELETE":
+        if r.is_system: return bad("Les roles systeme ne peuvent pas etre supprimes")
+        n = User.objects.filter(role=r.code).count()
+        if n: return bad("Impossible : %d utilisateur(s) ont ce role. Changez leur role d'abord." % n)
+        r.delete(); return Response({"ok": True})
+    if "name" in d:
+        if not (d["name"] or "").strip(): return bad("Nom du role requis")
+        r.name = d["name"].strip()[:60]
+    if not r.is_system:
+        for f in FLAGS:
+            if f in d: setattr(r, f, bool(d[f]))
+    r.save()
+    return Response(_ser_role(r))

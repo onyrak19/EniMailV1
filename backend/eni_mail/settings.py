@@ -76,7 +76,12 @@ REST_FRAMEWORK = {
 }
 from datetime import timedelta
 SIMPLE_JWT = {"ACCESS_TOKEN_LIFETIME": timedelta(days=1)}
-if os.getenv("EMAIL_MODE") == "smtp":
+# Mode e-mail : "brevo" (API HTTPS, marche partout, y compris Render gratuit), "smtp" (Gmail) ou "console".
+# Si une cle BREVO_API_KEY existe et que EMAIL_MODE n'est pas "smtp", Brevo est utilise automatiquement.
+EMAIL_MODE = (os.getenv("EMAIL_MODE") or "").strip().lower()
+if os.getenv("BREVO_API_KEY") and EMAIL_MODE != "smtp":
+    EMAIL_MODE = "brevo"
+if EMAIL_MODE == "smtp":
     EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
     EMAIL_HOST = "smtp.gmail.com"
     EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
@@ -85,10 +90,10 @@ if os.getenv("EMAIL_MODE") == "smtp":
     EMAIL_TIMEOUT = 10
     EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
     EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
-elif os.getenv("EMAIL_MODE") == "brevo":
+elif EMAIL_MODE == "brevo":
     # Envoi par API HTTPS (Brevo) : necessaire sur Render gratuit (SMTP bloque)
     EMAIL_BACKEND = "accounts.brevo_backend.BrevoEmailBackend"
-    BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
+    BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
 else:
     EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 DEFAULT_FROM_EMAIL = "ENI Mail <%s>" % (os.getenv("BREVO_SENDER_EMAIL") or os.getenv("EMAIL_HOST_USER") or "noreply@eni.local")

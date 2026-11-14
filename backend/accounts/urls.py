@@ -6,4 +6,8 @@ urlpatterns = [
     path("me/", v.me), path("me/password/", v.me_password), path("me/avatar/", v.me_avatar), path("users/", v.users), path("users/resolve/", v.resolve),
     path("admin/pending/", v.pending), path("admin/approve/<int:pk>/", v.approve), path("admin/reject/<int:pk>/", v.reject),
     path("admin/users/", v.admin_users), path("admin/users/<int:pk>/", v.admin_user),
+    path("config/", v.config),
+    path("admin/levels/", v.admin_levels), path("admin/levels/<int:pk>/", v.admin_level),
+    path("admin/parcours/", v.admin_parcours_list), path("admin/parcours/<int:pk>/", v.admin_parcours_one),
+    path("admin/roles/", v.admin_roles), path("admin/roles/<int:pk>/", v.admin_role),
 ]
